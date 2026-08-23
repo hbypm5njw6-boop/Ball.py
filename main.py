@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
@@ -8,8 +9,17 @@ from curl_cffi import requests as cffi_requests
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-EBAY_URL = "https://www.ebay.de/sch/i.html?_nkw=harry+kane+topps&_sop=10"
-VINTED_URL = "https://www.vinted.de/api/v2/catalog/items?search_text=Harry%20Kane%20Topps&order=newest_first"
+# --- HIER BELIEBIG VIELE SUCHBEGRIFFE EINTRAGEN ---
+SEARCH_QUERIES = [
+    "Harry Kane Topps",
+    "Kane Chrome UCC",
+    "Igamane",
+    "abde ezzalzouli auto"
+    "Saibari RC"
+    "Iphone"
+    
+    "
+]
 
 HEADERS_EBAY = {
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
@@ -20,7 +30,6 @@ HEADERS_EBAY = {
 seen_ebay = set()
 seen_vinted = set()
 
-# Kleiner Webserver für Render & Cron-job.org
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -36,7 +45,7 @@ def start_web_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-def send_to_discord(platform, title, price, link):
+def send_to_discord(platform, query, title, price, link):
     if not DISCORD_WEBHOOK_URL:
         return
     payload = {
@@ -45,7 +54,10 @@ def send_to_discord(platform, title, price, link):
                 "title": f"🛒 [{platform}] {title[:200]}",
                 "url": link,
                 "color": 15082531 if platform == "eBay" else 3066993,
-                "fields": [{"name": "Preis", "value": price, "inline": True}]
+                "fields": [
+                    {"name": "Suchbegriff", "value": query, "inline": True},
+                    {"name": "Preis", "value": price, "inline": True}
+                ]
             }
         ]
     }
@@ -54,9 +66,11 @@ def send_to_discord(platform, title, price, link):
     except Exception as e:
         print(f"Discord Fehler: {e}")
 
-def check_ebay(session):
+def check_ebay(session, query):
     try:
-        res = session.get(EBAY_URL, headers=HEADERS_EBAY, timeout=10)
+        encoded_query = urllib.parse.quote_plus(query)
+        url = f"https://www.ebay.de/sch/i.html?_nkw={encoded_query}&_sop=10"
+        res = session.get(url, headers=HEADERS_EBAY, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
             items = soup.find_all("li", class_="s-item")
@@ -73,14 +87,16 @@ def check_ebay(session):
                     continue
                 if link not in seen_ebay:
                     if len(seen_ebay) > 0:
-                        send_to_discord("eBay", title, price, link)
+                        send_to_discord("eBay", query, title, price, link)
                     seen_ebay.add(link)
     except Exception as e:
-        print(f"eBay Fehler: {e}")
+        print(f"eBay Fehler bei '{query}': {e}")
 
-def check_vinted(session):
+def check_vinted(session, query):
     try:
-        res = session.get(VINTED_URL, impersonate="chrome120", timeout=10)
+        encoded_query = urllib.parse.quote_plus(query)
+        url = f"https://www.vinted.de/api/v2/catalog/items?search_text={encoded_query}&order=newest_first"
+        res = session.get(url, impersonate="chrome120", timeout=10)
         if res.status_code == 200:
             data = res.json()
             items = data.get("items", [])
@@ -91,14 +107,14 @@ def check_vinted(session):
                 link = f"https://www.vinted.de/items/{item_id}"
                 if item_id not in seen_vinted:
                     if len(seen_vinted) > 0:
-                        send_to_discord("Vinted", title, price, link)
+                        send_to_discord("Vinted", query, title, price, link)
                     seen_vinted.add(item_id)
     except Exception as e:
-        print(f"Vinted Fehler: {e}")
+        print(f"Vinted Fehler bei '{query}': {e}")
 
 def bot_loop():
     print("Bot-Suchschleife gestartet...")
-    send_to_discord("System", "Bot ist 24/7 aktiv und scannt eBay & Vinted!", "0 €", "https://discord.com")
+    send_to_discord("System", "Alle Suchen", f"Bot scannt {len(SEARCH_QUERIES)} Suchbegriffe auf eBay & Vinted!", "0 €", "https://discord.com")
     
     ebay_session = requests.Session()
     vinted_session = cffi_requests.Session()
@@ -118,8 +134,12 @@ def bot_loop():
                 pass
             last_cookie_refresh = time.time()
 
-        check_ebay(ebay_session)
-        check_vinted(vinted_session)
+        for q in SEARCH_QUERIES:
+            check_ebay(ebay_session, q)
+            time.sleep(2)
+            check_vinted(vinted_session, q)
+            time.sleep(2)
+
         time.sleep(15)
 
 if __name__ == "__main__":
