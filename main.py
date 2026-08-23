@@ -1,5 +1,7 @@
 import os
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
@@ -17,6 +19,22 @@ HEADERS_EBAY = {
 
 seen_ebay = set()
 seen_vinted = set()
+
+# Kleiner Webserver für Render & Cron-job.org
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"Bot is running 24/7!")
+
+    def log_message(self, format, *args):
+        return
+
+def start_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
 
 def send_to_discord(platform, title, price, link):
     if not DISCORD_WEBHOOK_URL:
@@ -78,21 +96,26 @@ def check_vinted(session):
     except Exception as e:
         print(f"Vinted Fehler: {e}")
 
-def main():
-    print("Bot gestartet...")
+def bot_loop():
+    print("Bot-Suchschleife gestartet...")
     send_to_discord("System", "Bot ist 24/7 aktiv und scannt eBay & Vinted!", "0 €", "https://discord.com")
     
     ebay_session = requests.Session()
     vinted_session = cffi_requests.Session()
-    vinted_session.get("https://www.vinted.de", impersonate="chrome120")
+    try:
+        vinted_session.get("https://www.vinted.de", impersonate="chrome120")
+    except Exception:
+        pass
     
     last_cookie_refresh = time.time()
 
     while True:
-        # Vinted Session alle 20 Minuten erneuern
         if time.time() - last_cookie_refresh > 1200:
             vinted_session = cffi_requests.Session()
-            vinted_session.get("https://www.vinted.de", impersonate="chrome120")
+            try:
+                vinted_session.get("https://www.vinted.de", impersonate="chrome120")
+            except Exception:
+                pass
             last_cookie_refresh = time.time()
 
         check_ebay(ebay_session)
@@ -100,4 +123,6 @@ def main():
         time.sleep(15)
 
 if __name__ == "__main__":
-    main()
+    server_thread = threading.Thread(target=start_web_server, daemon=True)
+    server_thread.start()
+    bot_loop()
