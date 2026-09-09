@@ -20,13 +20,12 @@ SEARCH_QUERIES = [
 
 HEADERS_EBAY = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Language": "de-DE,de;q=0.9",
 }
 
 seen_ebay = set()
 seen_vinted = set()
-first_run = True
+is_first_run = True
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -51,7 +50,7 @@ def send_to_discord(platform, query, title, price, link):
             {
                 "title": f"🛒 [{platform}] {title[:200]}",
                 "url": link,
-                "color": 15082531 if platform == "eBay" else 3066993,
+                "color": 15082531 if "eBay" in platform else 3066993,
                 "fields": [
                     {"name": "Suchbegriff", "value": query, "inline": True},
                     {"name": "Preis", "value": price, "inline": True}
@@ -65,7 +64,7 @@ def send_to_discord(platform, query, title, price, link):
         print(f"Discord Fehler: {e}")
 
 def check_ebay(session, query):
-    global first_run
+    global is_first_run
     try:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://www.ebay.de/sch/i.html?_nkw={encoded_query}&_sop=10"
@@ -73,7 +72,7 @@ def check_ebay(session, query):
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
             items = soup.find_all("li", class_="s-item")
-            count = 0
+            sent_count = 0
             for item in items:
                 title_elem = item.find("div", class_="s-item__title")
                 price_elem = item.find("span", class_="s-item__price")
@@ -86,19 +85,22 @@ def check_ebay(session, query):
                 if "Shop on eBay" in title or not link:
                     continue
 
-                if first_run and count == 0:
-                    send_to_discord("eBay (Test)", query, title, price, link)
-                    count += 1
+                # Beim ersten Durchlauf: die 3 neuesten vorhandenen Angebote sofort senden
+                if is_first_run and sent_count < 3:
+                    send_to_discord("eBay (Aktuell)", query, title, price, link)
+                    sent_count += 1
+                    time.sleep(1)
 
+                # Bei späteren Durchläufen: nur nagelneue Angebote senden
                 if link not in seen_ebay:
-                    if not first_run:
+                    if not is_first_run:
                         send_to_discord("eBay", query, title, price, link)
                     seen_ebay.add(link)
     except Exception as e:
         print(f"eBay Fehler bei '{query}': {e}")
 
 def check_vinted(session, query):
-    global first_run
+    global is_first_run
     try:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://www.vinted.de/api/v2/catalog/items?search_text={encoded_query}&order=newest_first"
@@ -106,28 +108,30 @@ def check_vinted(session, query):
         if res.status_code == 200:
             data = res.json()
             items = data.get("items", [])
-            count = 0
+            sent_count = 0
             for item in items:
                 item_id = str(item.get("id"))
                 title = item.get("title", "Kein Titel")
                 price = f"{item.get('price', {}).get('amount', 'n/a')} {item.get('price', {}).get('currency_code', 'EUR')}"
                 link = f"https://www.vinted.de/items/{item_id}"
 
-                if first_run and count == 0:
-                    send_to_discord("Vinted (Test)", query, title, price, link)
-                    count += 1
+                # Beim ersten Durchlauf: die 3 neuesten vorhandenen Angebote sofort senden
+                if is_first_run and sent_count < 3:
+                    send_to_discord("Vinted (Aktuell)", query, title, price, link)
+                    sent_count += 1
+                    time.sleep(1)
 
                 if item_id not in seen_vinted:
-                    if not first_run:
+                    if not is_first_run:
                         send_to_discord("Vinted", query, title, price, link)
                     seen_vinted.add(item_id)
     except Exception as e:
         print(f"Vinted Fehler bei '{query}': {e}")
 
 def bot_loop():
-    global first_run
+    global is_first_run
     print("Bot-Suchschleife gestartet...")
-    send_to_discord("System", "Start", f"Bot scannt {len(SEARCH_QUERIES)} Suchen auf eBay & Vinted!", "0 €", "https://discord.com")
+    send_to_discord("System", "Start", "Bot scannt eBay & Vinted und sendet aktuelle Treffer!", "0 €", "https://discord.com")
     
     session = cffi_requests.Session()
     try:
@@ -152,7 +156,7 @@ def bot_loop():
             check_vinted(session, q)
             time.sleep(2)
 
-        first_run = False
+        is_first_run = False
         time.sleep(15)
 
 if __name__ == "__main__":
