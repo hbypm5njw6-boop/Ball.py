@@ -19,13 +19,14 @@ SEARCH_QUERIES = [
 ]
 
 HEADERS_EBAY = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-    "Accept-Language": "de-DE,de;q=0.9",
-    "Referer": "https://www.ebay.de/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 seen_ebay = set()
 seen_vinted = set()
+first_run = True
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -64,13 +65,15 @@ def send_to_discord(platform, query, title, price, link):
         print(f"Discord Fehler: {e}")
 
 def check_ebay(session, query):
+    global first_run
     try:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://www.ebay.de/sch/i.html?_nkw={encoded_query}&_sop=10"
-        res = session.get(url, headers=HEADERS_EBAY, timeout=10)
+        res = session.get(url, headers=HEADERS_EBAY, impersonate="chrome120", timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
             items = soup.find_all("li", class_="s-item")
+            count = 0
             for item in items:
                 title_elem = item.find("div", class_="s-item__title")
                 price_elem = item.find("span", class_="s-item__price")
@@ -82,14 +85,20 @@ def check_ebay(session, query):
                 link = link_elem.get("href", "").split("?")[0]
                 if "Shop on eBay" in title or not link:
                     continue
+
+                if first_run and count == 0:
+                    send_to_discord("eBay (Test)", query, title, price, link)
+                    count += 1
+
                 if link not in seen_ebay:
-                    if len(seen_ebay) > 0:
+                    if not first_run:
                         send_to_discord("eBay", query, title, price, link)
                     seen_ebay.add(link)
     except Exception as e:
         print(f"eBay Fehler bei '{query}': {e}")
 
 def check_vinted(session, query):
+    global first_run
     try:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://www.vinted.de/api/v2/catalog/items?search_text={encoded_query}&order=newest_first"
@@ -97,26 +106,32 @@ def check_vinted(session, query):
         if res.status_code == 200:
             data = res.json()
             items = data.get("items", [])
+            count = 0
             for item in items:
                 item_id = str(item.get("id"))
                 title = item.get("title", "Kein Titel")
                 price = f"{item.get('price', {}).get('amount', 'n/a')} {item.get('price', {}).get('currency_code', 'EUR')}"
                 link = f"https://www.vinted.de/items/{item_id}"
+
+                if first_run and count == 0:
+                    send_to_discord("Vinted (Test)", query, title, price, link)
+                    count += 1
+
                 if item_id not in seen_vinted:
-                    if len(seen_vinted) > 0:
+                    if not first_run:
                         send_to_discord("Vinted", query, title, price, link)
                     seen_vinted.add(item_id)
     except Exception as e:
         print(f"Vinted Fehler bei '{query}': {e}")
 
 def bot_loop():
+    global first_run
     print("Bot-Suchschleife gestartet...")
     send_to_discord("System", "Start", f"Bot scannt {len(SEARCH_QUERIES)} Suchen auf eBay & Vinted!", "0 €", "https://discord.com")
     
-    ebay_session = requests.Session()
-    vinted_session = cffi_requests.Session()
+    session = cffi_requests.Session()
     try:
-        vinted_session.get("https://www.vinted.de", impersonate="chrome120")
+        session.get("https://www.vinted.de", impersonate="chrome120")
     except Exception:
         pass
     
@@ -124,19 +139,20 @@ def bot_loop():
 
     while True:
         if time.time() - last_cookie_refresh > 1200:
-            vinted_session = cffi_requests.Session()
+            session = cffi_requests.Session()
             try:
-                vinted_session.get("https://www.vinted.de", impersonate="chrome120")
+                session.get("https://www.vinted.de", impersonate="chrome120")
             except Exception:
                 pass
             last_cookie_refresh = time.time()
 
         for q in SEARCH_QUERIES:
-            check_ebay(ebay_session, q)
+            check_ebay(session, q)
             time.sleep(2)
-            check_vinted(vinted_session, q)
+            check_vinted(session, q)
             time.sleep(2)
 
+        first_run = False
         time.sleep(15)
 
 if __name__ == "__main__":
