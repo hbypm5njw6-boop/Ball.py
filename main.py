@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import threading
 import urllib.parse
@@ -20,12 +21,15 @@ SEARCH_QUERIES = [
 
 HEADERS_EBAY = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "de-DE,de;q=0.9",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8",
 }
 
 seen_ebay = set()
 seen_vinted = set()
 is_first_run = True
+
+def log(msg):
+    print(msg, flush=True)
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -44,6 +48,7 @@ def start_web_server():
 
 def send_to_discord(platform, query, title, price, link):
     if not DISCORD_WEBHOOK_URL:
+        log("Kein Webhook gesetzt!")
         return
     payload = {
         "embeds": [
@@ -59,105 +64,103 @@ def send_to_discord(platform, query, title, price, link):
         ]
     }
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
+        res = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
+        log(f"Discord gesendet ({platform} - {query}): Status {res.status_code}")
     except Exception as e:
-        print(f"Discord Fehler: {e}")
+        log(f"Discord Fehler: {e}")
 
 def check_ebay(session, query):
     global is_first_run
     try:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://www.ebay.de/sch/i.html?_nkw={encoded_query}&_sop=10"
-        res = session.get(url, headers=HEADERS_EBAY, impersonate="chrome120", timeout=10)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            items = soup.find_all("li", class_="s-item")
-            sent_count = 0
-            for item in items:
-                title_elem = item.find("div", class_="s-item__title")
-                price_elem = item.find("span", class_="s-item__price")
-                link_elem = item.find("a", class_="s-item__link")
-                if not title_elem or not link_elem:
-                    continue
-                title = title_elem.text.strip()
-                price = price_elem.text.strip() if price_elem else "n/a"
-                link = link_elem.get("href", "").split("?")[0]
-                if "Shop on eBay" in title or not link:
-                    continue
+        res = session.get(url, headers=HEADERS_EBAY, timeout=8)
+        if res.status_code != 200:
+            log(f"[eBay] '{query}' HTTP Status: {res.status_code}")
+            return
 
-                # Beim ersten Durchlauf: die 3 neuesten vorhandenen Angebote sofort senden
-                if is_first_run and sent_count < 3:
-                    send_to_discord("eBay (Aktuell)", query, title, price, link)
-                    sent_count += 1
-                    time.sleep(1)
+        soup = BeautifulSoup(res.text, "html.parser")
+        items = soup.find_all("li", class_="s-item")
+        log(f"[eBay] '{query}' Roh-Treffer: {len(items)}")
 
-                # Bei späteren Durchläufen: nur nagelneue Angebote senden
-                if link not in seen_ebay:
-                    if not is_first_run:
-                        send_to_discord("eBay", query, title, price, link)
-                    seen_ebay.add(link)
+        sent_count = 0
+        for item in items:
+            title_elem = item.find("div", class_="s-item__title")
+            price_elem = item.find("span", class_="s-item__price")
+            link_elem = item.find("a", class_="s-item__link")
+            if not title_elem or not link_elem:
+                continue
+
+            title = title_elem.text.strip()
+            price = price_elem.text.strip() if price_elem else "k. A."
+            link = link_elem.get("href", "").split("?")[0]
+            if "Shop on eBay" in title or not link:
+                continue
+
+            if is_first_run and sent_count < 3:
+                send_to_discord("eBay (Aktuell)", query, title, price, link)
+                sent_count += 1
+                time.sleep(1)
+
+            if link not in seen_ebay:
+                if not is_first_run:
+                    send_to_discord("eBay", query, title, price, link)
+                seen_ebay.add(link)
     except Exception as e:
-        print(f"eBay Fehler bei '{query}': {e}")
+        log(f"eBay Fehler bei '{query}': {e}")
 
 def check_vinted(session, query):
     global is_first_run
     try:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://www.vinted.de/api/v2/catalog/items?search_text={encoded_query}&order=newest_first"
-        res = session.get(url, impersonate="chrome120", timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("items", [])
-            sent_count = 0
-            for item in items:
-                item_id = str(item.get("id"))
-                title = item.get("title", "Kein Titel")
-                price = f"{item.get('price', {}).get('amount', 'n/a')} {item.get('price', {}).get('currency_code', 'EUR')}"
-                link = f"https://www.vinted.de/items/{item_id}"
+        res = session.get(url, impersonate="chrome120", timeout=8)
+        if res.status_code != 200:
+            log(f"[Vinted] '{query}' HTTP Status: {res.status_code}")
+            return
 
-                # Beim ersten Durchlauf: die 3 neuesten vorhandenen Angebote sofort senden
-                if is_first_run and sent_count < 3:
-                    send_to_discord("Vinted (Aktuell)", query, title, price, link)
-                    sent_count += 1
-                    time.sleep(1)
+        data = res.json()
+        items = data.get("items", [])
+        log(f"[Vinted] '{query}' Treffer: {len(items)}")
 
-                if item_id not in seen_vinted:
-                    if not is_first_run:
-                        send_to_discord("Vinted", query, title, price, link)
-                    seen_vinted.add(item_id)
+        sent_count = 0
+        for item in items:
+            item_id = str(item.get("id"))
+            title = item.get("title", "Kein Titel")
+            price = f"{item.get('price', {}).get('amount', 'k. A.')} {item.get('price', {}).get('currency_code', 'EUR')}"
+            link = f"https://www.vinted.de/items/{item_id}"
+
+            if is_first_run and sent_count < 3:
+                send_to_discord("Vinted (Aktuell)", query, title, price, link)
+                sent_count += 1
+                time.sleep(1)
+
+            if item_id not in seen_vinted:
+                if not is_first_run:
+                    send_to_discord("Vinted", query, title, price, link)
+                seen_vinted.add(item_id)
     except Exception as e:
-        print(f"Vinted Fehler bei '{query}': {e}")
+        log(f"Vinted Fehler bei '{query}': {e}")
 
 def bot_loop():
     global is_first_run
-    print("Bot-Suchschleife gestartet...")
+    log("Bot-Suchschleife gestartet...")
     send_to_discord("System", "Start", "Bot scannt eBay & Vinted und sendet aktuelle Treffer!", "0 €", "https://discord.com")
     
-    session = cffi_requests.Session()
-    try:
-        session.get("https://www.vinted.de", impersonate="chrome120")
-    except Exception:
-        pass
-    
-    last_cookie_refresh = time.time()
+    ebay_session = requests.Session()
+    vinted_session = cffi_requests.Session()
 
     while True:
-        if time.time() - last_cookie_refresh > 1200:
-            session = cffi_requests.Session()
-            try:
-                session.get("https://www.vinted.de", impersonate="chrome120")
-            except Exception:
-                pass
-            last_cookie_refresh = time.time()
-
         for q in SEARCH_QUERIES:
-            check_ebay(session, q)
+            log(f"--- Prüfe: {q} ---")
+            check_ebay(ebay_session, q)
             time.sleep(2)
-            check_vinted(session, q)
+            check_vinted(vinted_session, q)
             time.sleep(2)
 
         is_first_run = False
-        time.sleep(15)
+        log("Durchlauf beendet. Warte 20 Sekunden...")
+        time.sleep(20)
 
 if __name__ == "__main__":
     server_thread = threading.Thread(target=start_web_server, daemon=True)
